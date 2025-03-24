@@ -271,7 +271,8 @@ class PeopleCounterApp:
         people_df = df[df['class'] == 0]  # person
         car_df = df[df['class'] == 2]     # car
         motorcycle_df = df[df['class'] == 3]  # motorcycle
-        truck_df = df[df['class'] == 7]   # truck
+        # truck_df = df[df['class'] == 7] 
+        truck_df = df[(df['class'] == 7) & (df['confidence'] > 0.05)]   # truck
         
         # Update counts
         self.people_count = len(people_df)
