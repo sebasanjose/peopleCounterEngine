@@ -19,11 +19,32 @@ class PeopleCounterApp:
         self.root.minsize(self.window_width, self.window_height)
         self.root.maxsize(self.window_width, self.window_height)
         
-        # Load YOLOv5 model
-        self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-        
-        # Set model to detect only people (class 0) and cars (class 2) in COCO dataset
-        self.model.classes = [0, 2]  # 0 is people, 2 is cars
+        # Check for available device
+        self.device = 'cpu'
+        try:
+            if torch.backends.mps.is_available():
+                self.device = 'mps'
+                print("Using MPS (Apple Silicon GPU) for acceleration")
+            elif torch.cuda.is_available():
+                self.device = 'cuda'
+                print("Using CUDA GPU for acceleration")
+            else:
+                print("Using CPU for computation (no GPU acceleration available)")
+                
+            # Load YOLOv5 model
+            # self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
+            self.model = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True)
+            
+            # Set model to detect people and various vehicles in COCO dataset
+            # 0: person, 2: car, 3: motorcycle, 7: truck
+            self.model.classes = [0, 2, 3, 7]
+            
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            # Fallback to CPU
+            self.device = 'cpu'
+            self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True, device='cpu')
+            self.model.classes = [0, 2, 3, 7]
         
         # Configure layout
         self.setup_layout()
@@ -35,6 +56,8 @@ class PeopleCounterApp:
         self.current_frame = None
         self.people_count = 0
         self.car_count = 0
+        self.motorcycle_count = 0
+        self.truck_count = 0
         self.slider_updating = False  # Flag to prevent recursive slider updates
     
     def setup_layout(self):
@@ -68,6 +91,14 @@ class PeopleCounterApp:
         # Car count display
         self.car_count_label = tk.Label(count_frame, text="Cars: 0", font=("Arial", 14))
         self.car_count_label.pack(side=tk.TOP, anchor=tk.E)
+        
+        # Motorcycle count display
+        self.motorcycle_count_label = tk.Label(count_frame, text="Motorcycles: 0", font=("Arial", 14))
+        self.motorcycle_count_label.pack(side=tk.TOP, anchor=tk.E)
+        
+        # Truck count display
+        self.truck_count_label = tk.Label(count_frame, text="Trucks: 0", font=("Arial", 14))
+        self.truck_count_label.pack(side=tk.TOP, anchor=tk.E)
         
         # Bottom area for slider and status - fixed height
         bottom_area_height = 80
@@ -222,66 +253,71 @@ class PeopleCounterApp:
                 self.play_btn.config(text="Play")
 
     def detect_and_display(self, frame):
-        """Detect people and cars in frame and display the result"""
+        """Detect people and vehicles in frame and display the result"""
         if frame is None:
             return
             
         # Convert from BGR to RGB for YOLOv5
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        # Perform detection
-        results = self.model(rgb_frame)
+        # Perform detection - let YOLOv5 handle the tensor conversion
+        with torch.no_grad():
+            results = self.model(rgb_frame)
         
         # Get detections dataframe
         df = results.pandas().xyxy[0]
         
-        # Filter for person class (class 0) and car class (class 2)
-        people_df = df[df['class'] == 0]
-        car_df = df[df['class'] == 2]
+        # Filter for different classes
+        people_df = df[df['class'] == 0]  # person
+        car_df = df[df['class'] == 2]     # car
+        motorcycle_df = df[df['class'] == 3]  # motorcycle
+        truck_df = df[df['class'] == 7]   # truck
         
         # Update counts
         self.people_count = len(people_df)
         self.car_count = len(car_df)
+        self.motorcycle_count = len(motorcycle_df)
+        self.truck_count = len(truck_df)
+        
+        # Update count labels
         self.people_count_label.config(text=f"People: {self.people_count}")
         self.car_count_label.config(text=f"Cars: {self.car_count}")
+        self.motorcycle_count_label.config(text=f"Motorcycles: {self.motorcycle_count}")
+        self.truck_count_label.config(text=f"Trucks: {self.truck_count}")
         
         # Draw bounding boxes
         result_frame = frame.copy()
         
-        # Draw people bounding boxes (green)
+        # Define colors for different object types (BGR format for OpenCV)
+        colors = {
+            'person': (0, 255, 0),      # Green
+            'car': (255, 0, 0),         # Blue
+            'motorcycle': (255, 0, 255), # Magenta
+            'truck': (0, 255, 255)       # Yellow
+        }
+        
+        # Draw boxes for each object type
         for _, row in people_df.iterrows():
-            x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
-            conf = row['confidence']
+            self.draw_box(result_frame, row, "Person", colors['person'])
             
-            # Draw rectangle
-            cv2.rectangle(result_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            
-            # Add label with confidence
-            label = f"Person: {conf:.2f}"
-            cv2.putText(result_frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            
-        # Draw car bounding boxes (blue)
         for _, row in car_df.iterrows():
-            x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
-            conf = row['confidence']
+            self.draw_box(result_frame, row, "Car", colors['car'])
             
-            # Draw rectangle
-            cv2.rectangle(result_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        for _, row in motorcycle_df.iterrows():
+            self.draw_box(result_frame, row, "Motorcycle", colors['motorcycle'])
             
-            # Add label with confidence
-            label = f"Car: {conf:.2f}"
-            cv2.putText(result_frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+        for _, row in truck_df.iterrows():
+            self.draw_box(result_frame, row, "Truck", colors['truck'])
         
         # Convert to format suitable for tkinter
         img = cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(img)
         
-        # Get container dimensions
+        # Resize if needed to fit the window
         container_width = self.video_container.winfo_width()
         container_height = self.video_container.winfo_height()
         
-        # Resize image to fit container while maintaining aspect ratio
-        if container_width > 1 and container_height > 1:
+        if container_width > 1 and container_height > 1:  # Ensure valid dimensions
             img = self.resize_image(img, container_width, container_height)
         
         # Convert to PhotoImage
@@ -290,6 +326,18 @@ class PeopleCounterApp:
         # Update the display and configure dimensions
         self.video_frame.config(image=img_tk)
         self.video_frame.image = img_tk  # Keep a reference to prevent garbage collection
+    
+    def draw_box(self, frame, detection, label_prefix, color):
+        """Draw a single bounding box with label"""
+        x1, y1, x2, y2 = int(detection['xmin']), int(detection['ymin']), int(detection['xmax']), int(detection['ymax'])
+        conf = detection['confidence']
+        
+        # Draw rectangle
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        
+        # Add label with confidence
+        label = f"{label_prefix}: {conf:.2f}"
+        cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
     def resize_image(self, img, target_width, target_height):
         """Resize image while maintaining aspect ratio"""
