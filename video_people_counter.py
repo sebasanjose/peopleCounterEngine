@@ -22,8 +22,8 @@ class PeopleCounterApp:
         # Load YOLOv5 model
         self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
         
-        # Set model to detect only people (class 0 in COCO dataset)
-        self.model.classes = [0]  # 0 is the class ID for people
+        # Set model to detect only people (class 0) and cars (class 2) in COCO dataset
+        self.model.classes = [0, 2]  # 0 is people, 2 is cars
         
         # Configure layout
         self.setup_layout()
@@ -34,6 +34,7 @@ class PeopleCounterApp:
         self.frame_count = 0
         self.current_frame = None
         self.people_count = 0
+        self.car_count = 0
         self.slider_updating = False  # Flag to prevent recursive slider updates
     
     def setup_layout(self):
@@ -56,9 +57,17 @@ class PeopleCounterApp:
         self.play_btn = tk.Button(self.btn_frame, text="Play", command=self.toggle_play, state=tk.DISABLED)
         self.play_btn.pack(side=tk.LEFT, padx=5)
         
+        # Count display frame
+        count_frame = tk.Frame(self.btn_frame)
+        count_frame.pack(side=tk.RIGHT, padx=20)
+        
         # People count display
-        self.count_label = tk.Label(self.btn_frame, text="People count: 0", font=("Arial", 14))
-        self.count_label.pack(side=tk.RIGHT, padx=20)
+        self.people_count_label = tk.Label(count_frame, text="People: 0", font=("Arial", 14))
+        self.people_count_label.pack(side=tk.TOP, anchor=tk.E)
+        
+        # Car count display
+        self.car_count_label = tk.Label(count_frame, text="Cars: 0", font=("Arial", 14))
+        self.car_count_label.pack(side=tk.TOP, anchor=tk.E)
         
         # Bottom area for slider and status - fixed height
         bottom_area_height = 80
@@ -213,7 +222,7 @@ class PeopleCounterApp:
                 self.play_btn.config(text="Play")
 
     def detect_and_display(self, frame):
-        """Detect people in frame and display the result"""
+        """Detect people and cars in frame and display the result"""
         if frame is None:
             return
             
@@ -226,15 +235,20 @@ class PeopleCounterApp:
         # Get detections dataframe
         df = results.pandas().xyxy[0]
         
-        # Filter for person class (class 0)
+        # Filter for person class (class 0) and car class (class 2)
         people_df = df[df['class'] == 0]
+        car_df = df[df['class'] == 2]
         
-        # Update people count
+        # Update counts
         self.people_count = len(people_df)
-        self.count_label.config(text=f"People count: {self.people_count}")
+        self.car_count = len(car_df)
+        self.people_count_label.config(text=f"People: {self.people_count}")
+        self.car_count_label.config(text=f"Cars: {self.car_count}")
         
         # Draw bounding boxes
         result_frame = frame.copy()
+        
+        # Draw people bounding boxes (green)
         for _, row in people_df.iterrows():
             x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
             conf = row['confidence']
@@ -245,6 +259,18 @@ class PeopleCounterApp:
             # Add label with confidence
             label = f"Person: {conf:.2f}"
             cv2.putText(result_frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+        # Draw car bounding boxes (blue)
+        for _, row in car_df.iterrows():
+            x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+            conf = row['confidence']
+            
+            # Draw rectangle
+            cv2.rectangle(result_frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            
+            # Add label with confidence
+            label = f"Car: {conf:.2f}"
+            cv2.putText(result_frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
         
         # Convert to format suitable for tkinter
         img = cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
