@@ -9,7 +9,15 @@ class PeopleCounterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Video People Counter")
-        self.root.geometry("1200x800")
+        
+        # Set fixed window size
+        self.window_width = 1200
+        self.window_height = 800
+        self.root.geometry(f"{self.window_width}x{self.window_height}")
+        
+        # Prevent automatic window resizing
+        self.root.minsize(self.window_width, self.window_height)
+        self.root.maxsize(self.window_width, self.window_height)
         
         # Load YOLOv5 model
         self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
@@ -17,8 +25,8 @@ class PeopleCounterApp:
         # Set model to detect only people (class 0 in COCO dataset)
         self.model.classes = [0]  # 0 is the class ID for people
         
-        # Create UI elements
-        self.create_widgets()
+        # Configure layout
+        self.setup_layout()
         
         # Video related variables
         self.cap = None
@@ -26,31 +34,71 @@ class PeopleCounterApp:
         self.frame_count = 0
         self.current_frame = None
         self.people_count = 0
-
-    def create_widgets(self):
-        # Top frame for buttons
-        btn_frame = tk.Frame(self.root)
-        btn_frame.pack(fill=tk.X, padx=10, pady=10)
+        self.slider_updating = False  # Flag to prevent recursive slider updates
+    
+    def setup_layout(self):
+        """Setup the UI layout using place for absolute positioning"""
+        # Create a main frame to contain everything
+        self.main_frame = tk.Frame(self.root, width=self.window_width, height=self.window_height)
+        self.main_frame.pack_propagate(False)  # Prevent propagation of size changes
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Button frame at top - fixed height
+        btn_frame_height = 50
+        self.btn_frame = tk.Frame(self.main_frame, height=btn_frame_height)
+        self.btn_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
         
         # Upload button
-        self.upload_btn = tk.Button(btn_frame, text="Upload Video", command=self.upload_video)
+        self.upload_btn = tk.Button(self.btn_frame, text="Upload Video", command=self.upload_video)
         self.upload_btn.pack(side=tk.LEFT, padx=5)
         
         # Play/Pause button
-        self.play_btn = tk.Button(btn_frame, text="Play", command=self.toggle_play, state=tk.DISABLED)
+        self.play_btn = tk.Button(self.btn_frame, text="Play", command=self.toggle_play, state=tk.DISABLED)
         self.play_btn.pack(side=tk.LEFT, padx=5)
         
         # People count display
-        self.count_label = tk.Label(btn_frame, text="People count: 0", font=("Arial", 14))
+        self.count_label = tk.Label(self.btn_frame, text="People count: 0", font=("Arial", 14))
         self.count_label.pack(side=tk.RIGHT, padx=20)
         
-        # Main frame for video display
-        self.video_frame = tk.Label(self.root, bg="black")
-        self.video_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Bottom area for slider and status - fixed height
+        bottom_area_height = 80
+        self.bottom_area = tk.Frame(self.main_frame, height=bottom_area_height)
+        self.bottom_area.pack(side=tk.BOTTOM, fill=tk.X)
+        self.bottom_area.pack_propagate(False)  # Prevent propagation of size changes
+        
+        # Slider frame
+        self.slider_frame = tk.Frame(self.bottom_area)
+        self.slider_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+        
+        # Current frame position label
+        self.frame_pos_label = tk.Label(self.slider_frame, text="Frame: 0 / 0", width=15, anchor=tk.W)
+        self.frame_pos_label.pack(side=tk.LEFT, padx=5)
+        
+        # Timeline slider
+        self.timeline_slider = tk.Scale(
+            self.slider_frame,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            showvalue=0,
+            command=self.on_slider_change,
+            state=tk.DISABLED
+        )
+        self.timeline_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         
         # Status bar
-        self.status_bar = tk.Label(self.root, text="Ready. Upload a video to begin.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar = tk.Label(self.bottom_area, text="Ready. Upload a video to begin.", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Video frame area - fills the rest of the space
+        video_frame_height = self.window_height - btn_frame_height - bottom_area_height
+        self.video_container = tk.Frame(self.main_frame, width=self.window_width, height=video_frame_height, bg="black")
+        self.video_container.pack_propagate(False)  # Prevent propagation of size changes
+        self.video_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        
+        # Actual video display label
+        self.video_frame = tk.Label(self.video_container, bg="black")
+        self.video_frame.place(relx=0.5, rely=0.5, anchor=tk.CENTER)  # Center in container
 
     def upload_video(self):
         """Open a file dialog to select a video file"""
@@ -76,6 +124,13 @@ class PeopleCounterApp:
             width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
+            # Update slider range
+            self.timeline_slider.config(
+                from_=0,
+                to=self.frame_count - 1,
+                state=tk.NORMAL
+            )
+            
             # Update status
             video_name = file_path.split("/")[-1]
             self.status_bar.config(text=f"Loaded: {video_name} ({width}x{height}, {fps:.2f} fps, {self.frame_count} frames)")
@@ -87,6 +142,7 @@ class PeopleCounterApp:
             ret, self.current_frame = self.cap.read()
             if ret:
                 self.detect_and_display(self.current_frame)
+                self.update_frame_position(0)
 
     def toggle_play(self):
         """Toggle between play and pause states"""
@@ -98,25 +154,63 @@ class PeopleCounterApp:
             self.play_btn.config(text="Pause")
             self.play_video()
 
+    def on_slider_change(self, value):
+        """Handle slider position changes"""
+        if self.slider_updating or not self.cap:
+            return
+            
+        # Convert to integer
+        frame_pos = int(float(value))
+        
+        # Seek to the selected frame
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+        
+        # Read and display the frame
+        ret, frame = self.cap.read()
+        if ret:
+            self.current_frame = frame
+            self.detect_and_display(frame)
+            self.update_frame_position(frame_pos)
+
+    def update_frame_position(self, frame_pos):
+        """Update frame position label and slider"""
+        # Update frame position label
+        self.frame_pos_label.config(text=f"Frame: {frame_pos} / {self.frame_count-1}")
+        
+        # Update slider position without triggering on_slider_change
+        self.slider_updating = True
+        self.timeline_slider.set(frame_pos)
+        self.slider_updating = False
+
     def play_video(self):
         """Process and display video frames"""
         if self.cap and self.playing:
+            # Get current position
+            current_pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            
+            # Check if we're at the end
+            if current_pos >= self.frame_count - 1:
+                # Reset to the beginning
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                current_pos = 0
+            
+            # Read the next frame
             ret, frame = self.cap.read()
             
             if ret:
                 self.current_frame = frame
                 self.detect_and_display(frame)
                 
+                # Update the frame position
+                self.update_frame_position(current_pos)
+                
                 # Continue playing at appropriate frame rate
                 # Using a simple approach here for simplicity
                 self.root.after(30, self.play_video)
             else:
-                # End of video reached
+                # End of video reached or error
                 self.playing = False
                 self.play_btn.config(text="Play")
-                
-                # Reset to the beginning of the video
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     def detect_and_display(self, frame):
         """Detect people in frame and display the result"""
@@ -156,17 +250,18 @@ class PeopleCounterApp:
         img = cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
         img = Image.fromarray(img)
         
-        # Resize if needed to fit the window
-        window_width = self.video_frame.winfo_width()
-        window_height = self.video_frame.winfo_height()
+        # Get container dimensions
+        container_width = self.video_container.winfo_width()
+        container_height = self.video_container.winfo_height()
         
-        if window_width > 1 and window_height > 1:  # Ensure valid dimensions
-            img = self.resize_image(img, window_width, window_height)
+        # Resize image to fit container while maintaining aspect ratio
+        if container_width > 1 and container_height > 1:
+            img = self.resize_image(img, container_width, container_height)
         
         # Convert to PhotoImage
         img_tk = ImageTk.PhotoImage(image=img)
         
-        # Update the display
+        # Update the display and configure dimensions
         self.video_frame.config(image=img_tk)
         self.video_frame.image = img_tk  # Keep a reference to prevent garbage collection
 
