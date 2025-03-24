@@ -1,14 +1,14 @@
 import cv2
 import numpy as np
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, IntVar, Checkbutton
 import torch
 from PIL import Image, ImageTk
 
 class PeopleCounterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Video People Counter")
+        self.root.title("Video People Counter with Heatmap")
         
         # Set fixed window size
         self.window_width = 1200
@@ -25,9 +25,6 @@ class PeopleCounterApp:
         # Set model to detect only people (class 0 in COCO dataset)
         self.model.classes = [0]  # 0 is the class ID for people
         
-        # Configure layout
-        self.setup_layout()
-        
         # Video related variables
         self.cap = None
         self.playing = False
@@ -35,6 +32,16 @@ class PeopleCounterApp:
         self.current_frame = None
         self.people_count = 0
         self.slider_updating = False  # Flag to prevent recursive slider updates
+        
+        # Heatmap related variables
+        self.heatmap = None
+        self.heatmap_alpha = 0.7  # Transparency of the heatmap overlay
+        self.show_heatmap = IntVar(value=1)  # Checkbox state
+        self.heatmap_max_value = 1  # To track max value for normalization
+        self.current_video_dimensions = (0, 0)  # To store the dimensions of the current video
+        
+        # Configure layout
+        self.setup_layout()
     
     def setup_layout(self):
         """Setup the UI layout using place for absolute positioning"""
@@ -55,6 +62,12 @@ class PeopleCounterApp:
         # Play/Pause button
         self.play_btn = tk.Button(self.btn_frame, text="Play", command=self.toggle_play, state=tk.DISABLED)
         self.play_btn.pack(side=tk.LEFT, padx=5)
+        
+        # No Reset Heatmap button - heatmap is continuous
+        
+        # Heatmap toggle checkbox
+        self.heatmap_checkbox = Checkbutton(self.btn_frame, text="Show Heatmap", variable=self.show_heatmap)
+        self.heatmap_checkbox.pack(side=tk.LEFT, padx=5)
         
         # People count display
         self.count_label = tk.Label(self.btn_frame, text="People count: 0", font=("Arial", 14))
@@ -124,6 +137,12 @@ class PeopleCounterApp:
             width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             
+            # Store the current video dimensions
+            self.current_video_dimensions = (width, height)
+            
+            # Initialize the heatmap
+            self.initialize_heatmap(width, height)
+            
             # Update slider range
             self.timeline_slider.config(
                 from_=0,
@@ -143,6 +162,13 @@ class PeopleCounterApp:
             if ret:
                 self.detect_and_display(self.current_frame)
                 self.update_frame_position(0)
+
+    def initialize_heatmap(self, width, height):
+        """Initialize the heatmap with zeros"""
+        self.heatmap = np.zeros((height, width), dtype=np.float32)
+        self.heatmap_max_value = 1  # Reset max value
+
+    # Removed reset_heatmap method as heatmap should be continuous
 
     def toggle_play(self):
         """Toggle between play and pause states"""
@@ -190,9 +216,11 @@ class PeopleCounterApp:
             
             # Check if we're at the end
             if current_pos >= self.frame_count - 1:
-                # Reset to the beginning
-                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                current_pos = 0
+                # Stop playing at the end instead of restarting
+                # This preserves the continuous heatmap
+                self.playing = False
+                self.play_btn.config(text="Play")
+                return
             
             # Read the next frame
             ret, frame = self.cap.read()
@@ -212,8 +240,69 @@ class PeopleCounterApp:
                 self.playing = False
                 self.play_btn.config(text="Play")
 
+    def update_heatmap(self, people_df):
+        """Update the heatmap with new detections"""
+        if self.heatmap is None:
+            return
+            
+        # For each detected person
+        for _, row in people_df.iterrows():
+            x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
+            
+            # Calculate center of the bounding box
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            
+            # Calculate the area of the bounding box
+            width = x2 - x1
+            height = y2 - y1
+            
+            # Create a 2D Gaussian kernel to distribute the intensity
+            # Use a larger sigma to create wider spread for better movement tracking
+            sigma = max(width, height) / 2  # Changed from 6 to 2 for wider spread
+            
+            # Use a larger size to affect more pixels and create better movement paths
+            size = max(width, height) * 2  # Doubled the size for better coverage
+            
+            # Ensure the kernel doesn't exceed the heatmap boundaries
+            x_min = max(0, center_x - size)
+            x_max = min(self.heatmap.shape[1] - 1, center_x + size)
+            y_min = max(0, center_y - size)
+            y_max = min(self.heatmap.shape[0] - 1, center_y + size)
+            
+            # Skip if the valid region is too small
+            if x_max <= x_min or y_max <= y_min:
+                continue
+                
+            # Create a meshgrid for the valid region
+            x_range = np.arange(x_min, x_max + 1)
+            y_range = np.arange(y_min, y_max + 1)
+            xx, yy = np.meshgrid(x_range, y_range)
+            
+            # Calculate Gaussian values
+            gaussian = np.exp(-((xx - center_x)**2 + (yy - center_y)**2) / (2 * sigma**2))
+            
+            # Update the heatmap
+            self.heatmap[y_min:y_max+1, x_min:x_max+1] += gaussian
+            
+            # Track max value for normalization
+            self.heatmap_max_value = max(self.heatmap_max_value, np.max(self.heatmap))
+
+    def get_colored_heatmap(self):
+        """Convert heatmap to a colored visualization"""
+        if self.heatmap is None:
+            return None
+            
+        # Normalize the heatmap
+        normalized = self.heatmap / self.heatmap_max_value
+        
+        # Apply colormap (using cv2 colormap)
+        colored = cv2.applyColorMap((normalized * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        
+        return colored
+
     def detect_and_display(self, frame):
-        """Detect people in frame and display the result"""
+        """Detect people in frame and display the result with heatmap overlay"""
         if frame is None:
             return
             
@@ -233,6 +322,9 @@ class PeopleCounterApp:
         self.people_count = len(people_df)
         self.count_label.config(text=f"People count: {self.people_count}")
         
+        # Update heatmap with new detections
+        self.update_heatmap(people_df)
+        
         # Draw bounding boxes
         result_frame = frame.copy()
         for _, row in people_df.iterrows():
@@ -245,6 +337,29 @@ class PeopleCounterApp:
             # Add label with confidence
             label = f"Person: {conf:.2f}"
             cv2.putText(result_frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        
+        # Overlay heatmap if enabled
+        if self.show_heatmap.get() and self.heatmap is not None:
+            colored_heatmap = self.get_colored_heatmap()
+            
+            # Ensure the heatmap and frame have the same dimensions
+            if colored_heatmap.shape[:2] == frame.shape[:2]:
+                # Apply a threshold to make low-intensity areas transparent
+                # This helps better visualize the movement patterns
+                mask = (self.heatmap / self.heatmap_max_value > 0.05).astype(np.uint8) * 255
+                mask = cv2.GaussianBlur(mask, (15, 15), 0)  # Smooth the mask edges
+                
+                # Convert mask to 3 channels
+                mask_3channel = cv2.merge([mask, mask, mask])
+                
+                # Use the mask for blending
+                alpha = self.heatmap_alpha
+                foreground = cv2.multiply(colored_heatmap.astype(float), alpha)
+                background = cv2.multiply(result_frame.astype(float), 1.0 - alpha)
+                weighted = cv2.add(foreground, background)
+                
+                # Apply the mask
+                result_frame = np.where(mask_3channel > 0, weighted, result_frame).astype(np.uint8)
         
         # Convert to format suitable for tkinter
         img = cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
