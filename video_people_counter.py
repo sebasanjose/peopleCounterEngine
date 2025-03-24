@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import filedialog
 import torch
 from PIL import Image, ImageTk
+import pandas as pd
 
 class PeopleCounterApp:
     def __init__(self, root):
@@ -19,6 +20,11 @@ class PeopleCounterApp:
         self.root.minsize(self.window_width, self.window_height)
         self.root.maxsize(self.window_width, self.window_height)
         
+        # Vehicle tracking system
+        self.vehicle_tracking = {}  # Will store {track_id: {'type': 'truck', 'last_seen': frame_num, 'bbox': (x1,y1,x2,y2)}}
+        self.track_id_counter = 0
+        self.tracking_threshold = 0.5  # IoU threshold for considering it the same vehicle
+        
         # Check for available device
         self.device = 'cpu'
         try:
@@ -32,8 +38,7 @@ class PeopleCounterApp:
                 print("Using CPU for computation (no GPU acceleration available)")
                 
             # Load YOLOv5 model
-            # self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-            self.model = torch.hub.load('ultralytics/yolov5', 'yolov5m', pretrained=True)
+            self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
             
             # Set model to detect people and various vehicles in COCO dataset
             # 0: person, 2: car, 3: motorcycle, 7: truck
@@ -147,6 +152,10 @@ class PeopleCounterApp:
         )
         
         if file_path:
+            # Reset tracking when loading a new video
+            self.vehicle_tracking = {}
+            self.track_id_counter = 0
+            
             # Release any previously opened video
             if self.cap is not None and self.cap.isOpened():
                 self.cap.release()
@@ -271,8 +280,78 @@ class PeopleCounterApp:
         people_df = df[df['class'] == 0]  # person
         car_df = df[df['class'] == 2]     # car
         motorcycle_df = df[df['class'] == 3]  # motorcycle
-        # truck_df = df[df['class'] == 7] 
-        truck_df = df[(df['class'] == 7) & (df['confidence'] > 0.05)]   # truck
+        truck_df = df[df['class'] == 7]   # truck
+        
+        # Current frame number
+        current_frame = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+        
+        # Combine all vehicle detections for tracking
+        all_vehicles_df = pd.concat([car_df, truck_df])
+        vehicles_to_remove_from_car = []
+        vehicles_to_add_to_truck = []
+        
+        # First pass: Check if any detection matches previously tracked trucks
+        for idx, vehicle in all_vehicles_df.iterrows():
+            vehicle_bbox = (vehicle['xmin'], vehicle['ymin'], vehicle['xmax'], vehicle['ymax'])
+            
+            # Check against tracked trucks
+            for track_id, track_info in self.vehicle_tracking.items():
+                if track_info['type'] == 'truck' and self.calculate_iou(vehicle_bbox, track_info['bbox']) > self.tracking_threshold:
+                    # This is likely the same truck we saw before
+                    if vehicle['class'] == 2:  # It's currently classified as a car
+                        # Reclassify as truck with higher confidence
+                        vehicles_to_remove_from_car.append(idx)
+                        
+                        # Boost the confidence but cap at 0.95
+                        boosted_conf = min(0.95, vehicle['confidence'] * 1.5)
+                        
+                        # Create a new truck entry
+                        truck_entry = vehicle.copy()
+                        truck_entry['class'] = 7  # Change to truck class
+                        truck_entry['confidence'] = boosted_conf
+                        truck_entry['name'] = 'truck'  # Update the name
+                        vehicles_to_add_to_truck.append(truck_entry)
+                    
+                    # Update tracking
+                    self.vehicle_tracking[track_id]['last_seen'] = current_frame
+                    self.vehicle_tracking[track_id]['bbox'] = vehicle_bbox
+                    break
+        
+        # Apply the changes to car and truck dataframes
+        if vehicles_to_remove_from_car:
+            car_df = car_df.drop(vehicles_to_remove_from_car)
+        
+        if vehicles_to_add_to_truck:
+            truck_add_df = pd.DataFrame(vehicles_to_add_to_truck)
+            truck_df = pd.concat([truck_df, truck_add_df], ignore_index=True)
+        
+        # Update tracking with new detections
+        for _, truck in truck_df.iterrows():
+            truck_bbox = (truck['xmin'], truck['ymin'], truck['xmax'], truck['ymax'])
+            tracked = False
+            
+            # Check if this truck is already being tracked
+            for track_id, track_info in self.vehicle_tracking.items():
+                if self.calculate_iou(truck_bbox, track_info['bbox']) > self.tracking_threshold:
+                    # Update existing track
+                    self.vehicle_tracking[track_id]['last_seen'] = current_frame
+                    self.vehicle_tracking[track_id]['bbox'] = truck_bbox
+                    tracked = True
+                    break
+            
+            # If not tracked, create new track
+            if not tracked:
+                self.track_id_counter += 1
+                self.vehicle_tracking[self.track_id_counter] = {
+                    'type': 'truck',
+                    'last_seen': current_frame,
+                    'bbox': truck_bbox,
+                    'confidence_history': [truck['confidence']]
+                }
+        
+        # Clean up old tracks (not seen for more than 30 frames)
+        self.vehicle_tracking = {k: v for k, v in self.vehicle_tracking.items() 
+                                if current_frame - v['last_seen'] < 30}
         
         # Update counts
         self.people_count = len(people_df)
@@ -327,6 +406,31 @@ class PeopleCounterApp:
         # Update the display and configure dimensions
         self.video_frame.config(image=img_tk)
         self.video_frame.image = img_tk  # Keep a reference to prevent garbage collection
+    
+    def calculate_iou(self, bbox1, bbox2):
+        """Calculate Intersection over Union between two bounding boxes"""
+        # Convert bboxes to (x, y, w, h) format
+        x1, y1, x2, y2 = bbox1
+        x3, y3, x4, y4 = bbox2
+        
+        # Calculate area of intersection
+        x_left = max(x1, x3)
+        y_top = max(y1, y3)
+        x_right = min(x2, x4)
+        y_bottom = min(y2, y4)
+        
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+        
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        
+        # Calculate area of both bboxes
+        bbox1_area = (x2 - x1) * (y2 - y1)
+        bbox2_area = (x4 - x3) * (y4 - y3)
+        
+        # Calculate IoU
+        iou = intersection_area / float(bbox1_area + bbox2_area - intersection_area)
+        return iou
     
     def draw_box(self, frame, detection, label_prefix, color):
         """Draw a single bounding box with label"""
